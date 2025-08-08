@@ -1,1 +1,35 @@
+library(tseries)
+library(forecast)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(RColorBrewer)
+
+# load PM2.5 data
+pm25 <- read.csv("E:/pm25.csv", fileEncoding = "UTF-8")
+pm25 <- pm25 %>%
+  pivot_wider(names_from = City, values_from = PM25)
+
+# Extract data from January 1, 2000 to September 10, 2013 for SARIMA fitting
+train <- pm25[1:5002,] 
+train_ts <- train[,-1] %>%
+  as.matrix() %>%
+  ts(frequency = 365)  
+
+# Fit ARIMA and predict the results 
+output <- list()
+for(i in 1:17){
+  fit <- auto.arima(train_ts[,i], D=1) 
+  save(fit, file=paste0("E:/SARIMA/", colnames(train_ts)[i] ,".RData"))
+  pred <- forecast(fit,h=3034,level=c(99.5)) 
+  data <- data.frame(Date=pm25$Date[5003:8036], historical=unlist(pm25[5003:8036,i+1]), counterfactual=pred$mean)
+  output[[i]] <- data
+}
+output <- bind_rows(output)
+city <- read.csv("E:/citycode.csv", fileEncoding = "UTF-8")
+output$City <- rep(city$市代码, each=3034)
+output <- select(output,City, Date, historical, counterfactual)
+write.csv(output, "E:/SARIMA/pm25.csv", row.names = F)
+
 
