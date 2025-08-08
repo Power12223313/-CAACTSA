@@ -1,1 +1,193 @@
+## 3.1 Define variables to store data ####
+
+# Define scenarios
+scenario <- c("fact", "cnfact")
+
+# Number of Monte Carlo simulations
+nsim <- 1000
+
+# Arrays to store attributable deaths by city
+ancity <- afcity <- array(NA, dim = c(length(county$County),length(outcome), 3, 3),
+                          dimnames = list(county$County,outcome, c("est", "ci.l", "ci.u"),c(scenario, "dif")))
+
+antotal <- aftotal <- array(NA,dim = c(length(outcome),3, 3),
+                            dimnames = list(outcome,c("est", "ci.l", "ci.u"), c(scenario, "dif")))
+
+
+# Vector to store predicted deaths
+deathbase <- array(NA, dim = c(length(county$County),length(outcome)),
+                   dimnames = list(county$County,outcome))
+
+
+# Store simulation results to assess uncertainty
+ancitysim <- array(NA, dim = c(length(county$County),length(outcome), 3, nsim + 1),
+                   dimnames = list(county$County,outcome,c(scenario, "dif"),c("est", paste0("sim", seq(nsim)))))
+
+antotalsim <- array(NA, dim = c(length(outcome), 3, nsim + 1),
+                    dimnames = list(outcome,c(scenario, "dif"),c("est", paste0("sim", seq(nsim)))))
+# Store daily attributable deaths
+anday <- array(NA, dim = c(length(county$County),length(outcome), 3, 
+                           length(unique(data$Date[!grepl("02-29$", data$Date)]))),
+               
+               dimnames = list(county$County,outcome,c(scenario, "dif"),
+                               unique(data$Date[!grepl("02-29$", data$Date)])))
+## 3.2 Calculate attributable deaths ####
+
+# Loop over each outcome and city
+for (o in seq(length(outcome))){
+  
+  # Print loop counter
+  cat("\n\n",o, "\n")
+  
+  for (i in seq(length(county$County))) {
+    
+    # Print
+    cat(i, "")
+    
+    # Extract data for the city
+    data_county <- subset(data,data$County == county$County[i])
+    
+    data_county <- data_county |>
+      mutate(
+        PM25_MAH = rollapply(PM2.5_H, width = lag_PM+1, FUN = mean, align = "right", fill = NA, partial = TRUE),
+        PM25_MAC = rollapply(PM2.5_C, width = lag_PM+1, FUN = mean, align = "right", fill = NA, partial = TRUE),
+        # Add period indicator
+        period = case_when(
+          Date <= as.Date("2017-12-31") ~ "CAA1",
+          Date >= as.Date("2018-01-01") & Date <= as.Date("2019-12-31")~ "CAA2",
+          Date >= as.Date("2020-01-01") & Date <= as.Date("2020-04-30")~ "COVID",
+          Date >= as.Date("2020-05-01") ~ "CAA2",
+          TRUE ~ NA_character_  # Handle unexpected cases (optional)
+        ))
+    
+    # Remove Feb 29
+    ind_date <- substr(data_county$Date, 6, 10) != "02-29"
+    
+    # Extract observed death series
+    deathobs <- data_county[,outcome[o]][ind_date]
+    
+    # Get baseline death series
+    deathdoy <- tapply(deathobs, yday(data_county$Date)[ind_date], mean, na.rm = T)
+    
+    while (any(isna <- is.na(deathdoy))) {
+      deathdoy[isna] <- rowMeans(Lag(deathdoy, c(-1, 1)), na.rm = T)[isna]
+    }
+    
+    deathproj <- rep(deathdoy, length = nrow(data_county[ind_date,]))
+    
+    deathbase[i,o] <- sum(deathdoy) * length(2014:2022)
+    
+    # Remove Feb 29 from data_county
+    data29 <- data_county[ind_date,]
+    
+    # Initialize matrix to store daily attributable deaths
+    an_day <- rep(NA, nrow(data29))
+    an_sims <- matrix(NA, nrow = nsim, ncol = nrow(data29))
+    
+    # Calculate attributable deaths by period
+    for(p in c("CAA1", "CAA2","COVID")) {
+      # Select data for current period
+      period_ind <- which(data29$period == p)
+      if(length(period_ind) == 0) next
+      
+      # Determine coefficients and variances by period
+      if(p == "CAA1") {
+        coef <- blupall_list[[o]][i,"blup"]
+        vcov <- blupall_list[[o]][i,"vcov"]
+      } else if(p == "CAA2")  {
+        coef <- blupall_list[[o]][i,"blup"] + blupall_CAA2_list[[o]][i,"blup"]
+        vcov <- blupall_list[[o]][i,"vcov"] + blupall_CAA2_list[[o]][i,"vcov"]
+      } else if(p == "COVID")  {
+        coef <- blupall_list[[o]][i,"blup"]  + blupall_COVID_list[[o]][i,"blup"]
+        vcov <- blupall_list[[o]][i,"vcov"] + blupall_COVID_list[[o]][i,"vcov"]
+      }
+      
+      # Sample from multivariate normal distribution
+      set.seed(06182024)
+      coefsim <- mvrnorm(nsim, coef, vcov)
+      
+      # Calculation under factual scenario
+      RR <- exp(data29$PM25_MAH[period_ind] * coef)
+      an_day[period_ind] <- ((RR-1)/RR) * deathproj[period_ind]
+      
+      # Loop over simulated distributions
+      for(s in seq(nsim)) {
+        RR <- exp(data29$PM25_MAH[period_ind] * coefsim[s])
+        an_sims[s, period_ind] <- ((RR-1)/RR) * deathproj[period_ind]
+      }
+    }
+    
+    # Store daily attributable deaths
+    anday[i, o, "fact", ] <- an_day
+    
+    # Calculate and store total
+    ancitysim[i, o, "fact", 1] <- sum(an_day, na.rm = TRUE)
+    ancitysim[i, o, "fact", -1] <- rowSums(an_sims, na.rm = TRUE)
+    
+    # Counterfactual calculation (repeat process using PM25_MAC)
+    an_day_cnfact <- rep(NA, nrow(data29))
+    an_sims_cnfact <- matrix(NA, nrow = nsim, ncol = nrow(data29))
+    
+    # Calculate attributable deaths by period
+    for(p in c("CAA1", "CAA2","COVID")) {
+      # Select data for current period
+      period_ind <- which(data29$period == p)
+      if(length(period_ind) == 0) next
+      
+      # Determine coefficients and variances by period
+      if(p == "CAA1") {
+        coef <- blupall_list[[o]][i,"blup"]
+        vcov <- blupall_list[[o]][i,"vcov"]
+      } else if(p == "CAA2")  {
+        coef <- blupall_list[[o]][i,"blup"]  + blupall_CAA2_list[[o]][i,"blup"]
+        vcov <- blupall_list[[o]][i,"vcov"] + blupall_CAA2_list[[o]][i,"vcov"]
+      } else if(p == "COVID")  {
+        coef <- blupall_list[[o]][i,"blup"]  + blupall_COVID_list[[o]][i,"blup"]
+        vcov <- blupall_list[[o]][i,"vcov"] + blupall_COVID_list[[o]][i,"vcov"]
+      }
+      
+      set.seed(06182024)
+      coefsim <- mvrnorm(nsim, coef, vcov)
+      
+      RR <- exp(data29$PM25_MAC[period_ind] * coef)
+      an_day_cnfact[period_ind] <- ((RR-1)/RR) * deathproj[period_ind]
+      
+      for(s in seq(nsim)) {
+        RR <- exp(data29$PM25_MAC[period_ind] * coefsim[s])
+        an_sims_cnfact[s, period_ind] <- ((RR-1)/RR) * deathproj[period_ind]
+      }
+    }
+    
+    anday[i, o, "cnfact", ] <- an_day_cnfact
+    ancitysim[i, o, "cnfact", 1] <- sum(an_day_cnfact, na.rm = TRUE)
+    ancitysim[i, o, "cnfact", -1] <- rowSums(an_sims_cnfact, na.rm = TRUE)
+  }
+}
+
+# Difference between scenarios
+ancitysim[, , 3, ] <- ancitysim[, , 2, ] - ancitysim[, , 1, ]
+anday[,,3,] <- anday[,,2,] - anday[,,1,]
+
+# Total attributable deaths across all cities
+antotalsim[,,] <- apply(ancitysim[,, , ], 2:4, sum, na.rm = TRUE)
+
+# Attributable deaths and confidence intervals
+ancity[, , 1, ] <- ancitysim[, , , 1]
+ancity[, , 2, ] <- apply(ancitysim[, , , -1], 1:3, quantile, 0.025, na.rm = TRUE)
+ancity[, , 3, ] <- apply(ancitysim[, , , -1], 1:3, quantile, 0.975, na.rm = TRUE)
+
+# Total attributable deaths across all cities and confidence intervals
+antotal[ ,1, ] <- antotalsim[ , , 1]
+antotal[ ,2, ] <- apply(antotalsim[ , , -1], 1:2, quantile, 0.025, na.rm = T)
+antotal[ ,3, ] <- apply(antotalsim[, , -1], 1:2, quantile, 0.975, na.rm = T)
+
+# Attributable fractions
+for (o in 1:15) {
+  afcity[,o, , ] <- ancity[,o, , ] / deathbase[,o] * 100
+  aftotal[o, , ] <- antotal[o, , ] / as.numeric(sum(deathbase[,o], na.rm = TRUE )) * 100
+}
+
+# Proportion of mortality attributable to policy-induced air quality changes (counterfactual as denominator)
+apcity <- (afcity[, , 1, 3] / afcity[, , 1, 2]) * 100
+aptotal <- (aftotal[ ,1, 3] / aftotal[, 1, 2]) * 100
 
