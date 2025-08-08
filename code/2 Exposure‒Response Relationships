@@ -1,1 +1,384 @@
+### 1. Preparation ####
+# Load packages
+packages <- c("dlnm","mixmeta","splines","zoo","MASS","tseries","RColorBrewer","fable","fpp3",
+              "forecast","randomForest","ggplot2","tidyverse","patchwork","stringi",
+              "grid","sjPlot","scales","ggtext","forcats","magick")
+
+lapply(packages, library, character.only = TRUE)
+
+# Import data
+load("data.Rdata")
+load("county.Rdata")
+load("NameCounty.Rdata")
+load("NameCity.Rdata")
+
+# Define outcomes
+outcome <- c("Total", "Total_male", "Total_female", "Total_above65", "Total_below65",
+             "Circulatory", "Circulatory_male", "Circulatory_female", "Circulatory_above65", "Circulatory_below65",
+             "Respiratory", "Respiratory_male", "Respiratory_female", "Respiratory_above65", "Respiratory_below65")
+
+# Add indicator
+data <- data %>%
+  mutate(
+    r1 = case_when(
+      Date <= as.Date("2017-12-31") ~ "CAA1",
+      Date >= as.Date("2018-01-01") & Date <= as.Date("2019-12-31")~ "CAA2",
+      Date >= as.Date("2020-01-01") & Date <= as.Date("2020-04-30")~ "COVID",
+      Date >= as.Date("2020-05-01") ~ "CAA2",
+      TRUE ~ NA_character_  
+    )) %>%
+  mutate(
+    r1 = factor(r1, levels = c("CAA1", "CAA2","COVID"))
+  )
+
+levels(data$r1) 
+
+## 2.2 Stage 1 GAM ####
+# Define parameters
+dftrend <- 7; lag_PM <- 1; lag_TM <- 2; df_TM <- 3; lag_RH <- 2;df_RH <- 3
+
+# Store results
+ncoef <- 1
+coefall <- coefall_CAA2 <- coefall_COVID <- matrix(NA, length(county$County), ncoef, 
+                                                   dimnames = list(county$County))
+vcovall <- vcovall_CAA2 <- vcovall_COVID  <- vector("list", length(county$County))
+
+names(vcovall) <- names(vcovall_CAA2)<- names(vcovall_COVID)  <-  county$County
+
+coefall_list <- list()
+vcovall_list <- list()
+
+coefall_CAA2_list <- list()
+vcovall_CAA2_list <- list()
+
+coefall_COVID_list <- list()
+vcovall_COVID_list <- list()
+
+
+# Loop over each outcome and city
+for (o in seq(length(outcome))) {
+  
+  cat("\n\n",o, "\n")
+  
+  outcome_name <- outcome[o]
+  
+  for (i in seq(length(county$County))) {
+    
+    cat(i, "")
+    
+    # Extract data for the corresponding city
+    county_name <- county$County[i]
+    data_county <- subset(data,data$County == county$County[i])
+    
+    # Variable transformation
+    data_county <- data_county |>
+      mutate(
+        dow = wday(data_county$Date, label = TRUE),  
+        time = seq(1:length(data_county$Date)),
+        PM25_MA = rollapply(PM2.5_H, width = lag_PM+1, FUN = mean, align = "right", fill = NA, partial = TRUE),
+        TM_MA = rollapply(t2m, width = lag_TM+1, FUN = mean, align = "right", fill = NA, partial = TRUE),
+        RH_MA = rollapply(rh, width = lag_RH+1, FUN = mean, align = "right", fill = NA, partial = TRUE))
+    
+    # Define model formula
+    formula <- as.formula(paste0(
+      outcome_name, "~ PM25_MA +  r1 : PM25_MA  + ns(TM_MA, df = df_TM) + ns(RH_MA, df = df_RH) + ",
+      "ns(time, df = dftrend*length(unique(Year))) + dow"
+    ))
+    
+    # Fit model
+    model <- glm(formula, data_county, family = quasipoisson, na.action = "na.exclude")
+    
+    
+    
+    coefall[[i]] <- coef(model)["PM25_MA"]
+    vcovall[[i]] <- vcov(model)["PM25_MA", "PM25_MA"]
+    
+    coefall_CAA2[[i]] <- coef(model)["PM25_MA:r1CAA2" ]+coef(model)["PM25_MA"]
+    vcovall_CAA2[[i]] <- vcov(model)["PM25_MA", "PM25_MA"] + vcov(model)["PM25_MA:r1CAA2", "PM25_MA:r1CAA2"] + 2 * vcov(model)["PM25_MA", "PM25_MA:r1CAA2"]
+    
+    coefall_COVID[[i]] <- coef(model)["PM25_MA:r1COVID" ]+coef(model)["PM25_MA"]
+    vcovall_COVID[[i]] <- vcov(model)["PM25_MA", "PM25_MA"] + vcov(model)["PM25_MA:r1COVID", "PM25_MA:r1COVID"] + 2 * vcov(model)["PM25_MA", "PM25_MA:r1COVID"]
+    
+    
+  }
+  
+  # Store coefficients for each outcome
+  coefall_list[[o]] <- coefall
+  vcovall_list[[o]]<- vcovall
+  
+  coefall_CAA2_list[[o]] <- coefall_CAA2
+  vcovall_CAA2_list[[o]] <- vcovall_CAA2
+  
+  coefall_COVID_list[[o]] <- coefall_COVID
+  vcovall_COVID_list[[o]] <- vcovall_COVID
+  
+}
+
+
+## 2.3 Stage 2 meta ####
+
+
+# meta预测因子
+
+metapred <- read.csv("metapred_county.csv")
+
+
+var1CAA1 <- metapred %>% 
+  filter(Year<=2017) %>% 
+  group_by(County) %>% 
+  summarise(GDP = mean(GDP),.groups = 'drop') 
+
+var1CAA2 <- metapred %>% 
+  filter(Year >= 2018 & Year <= 2019 | Year > 2020)%>% 
+  group_by(County) %>% 
+  summarise(GDP = mean(GDP),.groups = 'drop')
+
+var1COVID <- metapred %>% 
+  filter(Year == 2020)%>% 
+  group_by(County) %>% 
+  summarise(GDP = mean(GDP),.groups = 'drop')
+
+var2CAA1  <- data %>% 
+  filter(Year<=2017) %>% 
+  group_by(County) %>% 
+  summarise(PM2.5Mean = mean(PM2.5_H, na.rm = TRUE),
+            PM2.5IQR = IQR(PM2.5_H),
+            TMMean = mean(t2m, na.rm = TRUE),
+            RHMean = mean(rh, na.rm = TRUE), .groups = 'drop')
+
+var2CAA2  <- data %>% 
+  filter(
+    (Year >= 2018 & Year <= 2019) | (Year >= 2020 & Date >= as.Date("2020-05-01"))
+  ) %>% 
+  group_by(County) %>% 
+  summarise(PM2.5Mean = mean(PM2.5_H, na.rm = TRUE),
+            PM2.5IQR = IQR(PM2.5_H),
+            TMMean = mean(t2m, na.rm = TRUE),
+            RHMean = mean(rh, na.rm = TRUE), .groups = 'drop')
+
+var2COVID  <- data %>% 
+  filter(Year==2020) %>% 
+  group_by(County) %>% 
+  summarise(PM2.5Mean = mean(PM2.5_H, na.rm = TRUE),
+            PM2.5IQR = IQR(PM2.5_H),
+            TMMean = mean(t2m, na.rm = TRUE),
+            RHMean = mean(rh, na.rm = TRUE), .groups = 'drop')
+
+metapredCAA1 <- merge(var1CAA1,var2CAA1,by = "County")
+metapredCAA1 <- merge(metapredCAA1,county,by ="County")
+metapredCAA1 <- metapredCAA1[order(metapredCAA1$Code),]
+
+metapredCAA2 <- merge(var1CAA2,var2CAA2,by = "County")
+metapredCAA2 <- merge(metapredCAA2,county,by ="County")
+metapredCAA2 <- metapredCAA2[order(metapredCAA2$Code),]
+
+metapredCOVID <- merge(var1COVID,var2COVID,by = "County")
+metapredCOVID <- merge(metapredCOVID,county,by ="County")
+metapredCOVID <- metapredCOVID[order(metapredCOVID$Code),]
+
+
+
+datanewCAA1 <- data.frame(RHMean=mean(metapredCAA1$RHMean),
+                          GDP=mean(metapredCAA1$GDP))
+
+datanewCAA2 <- data.frame(RHMean=mean(metapredCAA2$RHMean),
+                          GDP=mean(metapredCAA2$GDP))
+
+datanewCOVID <- data.frame(RHMean=mean(metapredCOVID$RHMean),
+                           GDP=mean(metapredCOVID$GDP))
+
+# meta
+blupall_list <- list()
+all_list <- list()
+
+blupall_CAA2_list <- list()
+all_CAA2_list <- list()
+
+blupall_COVID_list <- list()
+all_COVID_list <- list()
+
+
+for (o in seq(length(outcome))) {
+  
+  
+  cat("\n\n",o, "\n")
+  
+  # Get BLUP
+  mvmlall <- mixmeta(coefall_list[[o]] ~  RHMean + GDP ,vcovall_list[[o]], data = metapredCAA1,
+                     control = list(showiter = T, igls.inititer = 10), method = "reml",na.action = "na.exclude")
+  
+  mvmlall_CAA2 <- mixmeta(coefall_CAA2_list[[o]] ~ RHMean + GDP ,vcovall_CAA2_list[[o]], data = metapredCAA2,
+                          control = list(showiter = T, igls.inititer = 10), method = "reml",na.action = "na.exclude")
+  
+  
+  mvmlall_COVID <- mixmeta(coefall_COVID_list[[o]] ~  RHMean + GDP ,vcovall_COVID_list[[o]], data = metapredCOVID,
+                           control = list(showiter = T, igls.inititer = 10), method = "reml",na.action = "na.exclude")
+  
+  
+  
+  
+  mvpred <- predict(mvmlall,datanewCAA1,vcov=T,format="list")
+  
+  mvpred_CAA2 <- predict(mvmlall_CAA2,datanewCAA2,vcov=T,format="list")
+  
+  mvpred_COVID <- predict(mvmlall_COVID,datanewCOVID,vcov=T,format="list")
+  
+  
+  
+  
+  blupall_list[[o]] <- blup(mvmlall, vcov = T)
+  all_list[[o]]<- mvpred
+  
+  
+  blupall_CAA2_list[[o]] <- blup(mvmlall_CAA2, vcov = T)
+  all_CAA2_list[[o]]<- mvpred_CAA2
+  
+  blupall_COVID_list[[o]] <- blup(mvmlall_COVID, vcov = T)
+  all_COVID_list[[o]]<- mvpred_COVID
+  
+  
+  
+  
+  
+}
+
+names(blupall_list) <- names(all_list) <- outcome
+
+names(blupall_CAA2_list) <- names(all_CAA2_list) <- outcome
+
+names(blupall_COVID_list) <- names(all_COVID_list) <- outcome
+
+# Initialize an empty data frame to store all results
+all_results <- data.frame(
+  Iteration = integer(),
+  Comparison = character(),
+  Difference = numeric(),
+  P_value = numeric(),
+  Adjusted_P = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (o in 1:15) {
+  cat("\n=== Iteration", o, "===\n")
+  
+  # Get fits and standard errors
+  fit1 <- all_list[[o]]$fit
+  se_fit1 <- sqrt(diag(all_list[[o]]$vcov)) 
+  
+  fit2 <-  all_CAA2_list[[o]]$fit
+  se_fit2 <- sqrt(diag(all_CAA2_list[[o]]$vcov))
+  
+  fit3 <-  all_COVID_list[[o]]$fit
+  se_fit3 <- sqrt(diag(all_COVID_list[[o]]$vcov))
+  
+  # Calculate 95% confidence intervals
+  alpha <- 0.05
+  z_value <- qnorm(1 - alpha/2)
+  ci1 <- c(fit1 - z_value * se_fit1, fit1 + z_value * se_fit1)
+  ci2 <- c(fit2 - z_value * se_fit2, fit2 + z_value * se_fit2)
+  ci3 <- c(fit3 - z_value * se_fit3, fit3 + z_value * se_fit3)
+  
+  # Modified comparison function for 3 fits that returns all results
+  multiple_comparisons_3fits_all <- function(fit1, se_fit1, fit2, se_fit2, fit3, se_fit3, 
+                                             method = "bonferroni") {
+    # Calculate all possible contrasts
+    diff12 <- fit1 - fit2
+    diff13 <- fit1 - fit3
+    diff23 <- fit2 - fit3
+    
+    # Calculate standard errors
+    se12 <- sqrt(se_fit1^2 + se_fit2^2)
+    se13 <- sqrt(se_fit1^2 + se_fit3^2)
+    se23 <- sqrt(se_fit2^2 + se_fit3^2)
+    
+    # Calculate z-values and p-values
+    z12 <- diff12 / se12
+    z13 <- diff13 / se13
+    z23 <- diff23 / se23
+    
+    p12 <- 2 * pnorm(-abs(z12))
+    p13 <- 2 * pnorm(-abs(z13))
+    p23 <- 2 * pnorm(-abs(z23))
+    
+    # Combine p-values
+    p_values <- c(p12, p13, p23)
+    
+    # Multiple testing correction
+    adjusted_p <- p.adjust(p_values, method = method)
+    
+    # Create results dataframe
+    results <- data.frame(
+      Comparison = c("fit1 vs fit2", "fit1 vs fit3", "fit2 vs fit3"),
+      Difference = c(mean(diff12), mean(diff13), mean(diff23)),
+      SE = c(mean(se12), mean(se13), mean(se23)),
+      Z = c(mean(z12), mean(z13), mean(z23)),
+      P_value = p_values,
+      Adjusted_P = adjusted_p,
+      stringsAsFactors = FALSE
+    )
+    
+    return(results)
+  }
+  
+  # Use the function to get all results
+  comparison_results <- multiple_comparisons_3fits_all(fit1, se_fit1, fit2, se_fit2, 
+                                                       fit3, se_fit3)
+  
+  # Add iteration number and append to all_results
+  iteration_results <- data.frame(
+    Iteration = o,
+    Comparison = comparison_results$Comparison,
+    Difference = comparison_results$Difference,
+    P_value = comparison_results$P_value,
+    Adjusted_P = comparison_results$Adjusted_P,
+    stringsAsFactors = FALSE
+  )
+  
+  all_results <- rbind(all_results, iteration_results)
+  
+  # Print current iteration and results (optional)
+  cat("\nConfidence Intervals:\n")
+  cat("fit1:", ci1, "\n")
+  cat("fit2:", ci2, "\n")
+  cat("fit3:", ci3, "\n\n")
+  
+  cat("Results for iteration", o, ":\n")
+  print(comparison_results)
+  cat("\n")
+}
+
+# Print the final table with all results
+cat("\n=== Final Results Table ===\n")
+print(all_results)
+
+
+all_results$P_value <- ifelse(as.numeric(all_results$P_value) < 0.001, 
+                              "<0.001", 
+                              sprintf("%.3f", as.numeric(all_results$P_value)))
+
+all_results$Adjusted_P <- ifelse(as.numeric(all_results$Adjusted_P) < 0.001, 
+                                 "<0.001", 
+                                 sprintf("%.3f", as.numeric(all_results$Adjusted_P)))
+
+
+all_results$Comparison <- gsub("fit1", "CAA1", all_results$Comparison)
+all_results$Comparison <- gsub("fit2", "CAA2", all_results$Comparison)
+all_results$Comparison <- gsub("fit3", "COVID", all_results$Comparison)
+
+all_results$Iteration <- outcome[all_results$Iteration]
+
+all_results <- all_results %>% 
+  mutate(
+    disease = ifelse(grepl("_", Iteration), 
+                     sub("_.*", "", Iteration), 
+                     Iteration),
+    group = ifelse(grepl("_", Iteration), 
+                   sub(".*_", "", Iteration), 
+                   "all")
+  ) 
+
+all_results <- all_results %>%
+  select(Iteration, disease, group, everything())
+# You can also write the results to a CSV file if desired
+write.csv(all_results, "comparison_results.csv", row.names = FALSE)
 
