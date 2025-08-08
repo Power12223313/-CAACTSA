@@ -1,1 +1,100 @@
+# TS SCB ####
+
+# SCB Monthly Concentration Trend Changes
+
+# Monthly concentration by county
+pm25meanmonth <-data%>%
+  select(County,Date,PM2.5_H,PM2.5_C) %>%
+  mutate(YearMonth = as.Date(paste0(substr(Date, 1, 7), "-01")),
+         dif = PM2.5_C-PM2.5_H) %>%
+  group_by(YearMonth,County) %>%
+  summarize(PM2.5_H = mean(PM2.5_H),
+            PM2.5_C = mean(PM2.5_C),
+            dif = mean(dif),.groups = 'drop')  
+
+# SCB monthly concentration
+pm25scb <- as.data.frame(matrix(NA,107,10))
+colnames(pm25scb) <- c("YearMonth",
+                       "fact","factmin","factmax",
+                       "cnfact","cnfactmin","cnfactmax",
+                       "dif","difmin","difmax")
+pm25scb <- pm25meanmonth %>% 
+  group_by(YearMonth) %>%
+  summarize(fact = mean(PM2.5_H),
+            factmin=min(PM2.5_H),factmax=max(PM2.5_H),
+            cnfact = mean(PM2.5_C),
+            cnfactmin=min(PM2.5_C),cnfactmax=max(PM2.5_C),
+            difmean = mean(dif),
+            difmin=min(dif),difmax=max(dif),
+            .groups = 'drop')
+
+# Plot the chart
+p1 <- ggplot(pm25scb) +
+  geom_line(aes(x = YearMonth, y = fact,color = "fact"), size = 0.8) +
+  geom_ribbon(aes(x = YearMonth, ymin = factmin, ymax = factmax), fill = "blue", alpha = 0.2, color = NA) +
+  geom_line(aes(x = YearMonth, y = cnfact,color = "cnfact"), size = 0.8) +
+  geom_ribbon(aes(x = YearMonth, ymin = cnfactmin, ymax = cnfactmax), fill = "red", alpha = 0.2, color = NA) +
+  scale_color_manual(values = c("fact" = "blue","cnfact" = "red"), name = "Scenarios") +
+  scale_x_date(breaks = date_breaks("1 years"),
+               labels = date_format("%Y")) + # Adjust x-axis format to display only the year
+  xlab("Year") +
+  ylab(expression(paste("Monthly PM"[2.5], " Concentration"))) +
+  theme(#axis.text.x = element_text(angle = 45, hjust = 1),
+    text = element_text(family = "Arial", size = 12),
+    panel.background = element_rect(fill = "white"),
+    axis.line = element_line(color = "black", size = 0.5),  # Set axis line color and size
+    panel.border = element_blank())+ # Remove panel border
+  guides(color = guide_legend(override.aes = list(width = 0.3))) + # Customize legend item width
+  theme(legend.position = "top", # Place legend at the top
+        legend.justification = "center") # Align legend to the left
+
+
+
+ggsave("fig_01 PM2.5 TS plots of SCB.tif",
+       plot = p1,
+       dpi = 300,
+       units = "mm",
+       width = 179,
+       height = 134.25,
+       device = 'tiff',
+       compression = "lzw")
+
+# Table 1: SCB three diseases, two scenarios af, difference af, difference an, ap ####
+# Define tab
+disease <- c("Cardiorespiratory","Circulatory","Respiratory")
+colnames <- c("Disease","fact_af", "cnfact_af","dif_af", "dif_an","ap")
+tab <- data.frame(matrix(NA, nrow = length(disease), ncol = length(colnames)))
+colnames(tab) <- colnames
+tab$Disease <- disease
+
+# Fill in the data
+tab[,2] <- c(paste0( aftotal[c(1,6,11),"est","fact"]," [",
+                     aftotal[c(1,6,11),"ci.l","fact"],",",
+                     aftotal[c(1,6,11),"ci.u","fact"],"]"))
+
+tab[,3] <- c(paste0( aftotal[c(1,6,11),"est","cnfact"]," [",
+                     aftotal[c(1,6,11),"ci.l","cnfact"],",",
+                     aftotal[c(1,6,11),"ci.u","cnfact"],"]"))
+
+tab[,4] <- c(paste0( aftotal[c(1,6,11),"est","dif"]," [",
+                     aftotal[c(1,6,11),"ci.l","dif"],",",
+                     aftotal[c(1,6,11),"ci.u","dif"],"]"))
+
+tab[,5] <- c(paste0( antotal[c(1,6,11),"est","dif"]," [",
+                     antotal[c(1,6,11),"ci.l","dif"],",",
+                     antotal[c(1,6,11),"ci.u","dif"],"]"))
+
+tab[,6] <- c(paste0( aptotal[c(1,6,11)]))
+
+
+# Draw the three-line table
+tab_df(tab, title = "Table. Summary of PM2.5 related mortality in the SCB  ",
+       col.header = c('Disease',
+                      'PM2.5-related mortality in actual scenario (% - 95% CI)',
+                      'PM2.5-related mortality in counterfactual scenario (% -95% CI)',
+                      'PM2.5-related mortality attributed to CAA (% -95% CI)',
+                      'PM2.5-related number of deaths attributed to CAA(95% CI)',
+                      'Proportion of PM2.5-related mortality attributed to CAA (%)'
+       ),
+       file = "tab Summary of PM2.5 related mortality in the SCB .html")
 
